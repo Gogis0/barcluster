@@ -1,0 +1,49 @@
+11.12.:
+- path visualization
+- prefix noise
+- delta parameter
+- dtw scores discriminative power
+- dtw scores distribution
+- random scores
+- K-Means \ K-medoids implementation
+
+TODO:
+- spatne ready = [3801, 3790, 1882]
+- spatne dvojice readov: [(1081, 2289), (1081, 3769), (2288, 2936), (2288, 3773), (2288, 3775), (2935, 3769), (2935, 3774)]
+- k-merova tabulka
+- vlastny k-medoids
+
+17.1.:
+- studium DBSCAN, experimentovanie so sklearn implementaciou
+22.1.:
+- spectral clustering works, eigengap needs to ingore the first eigenvalue
+23.1.:
+- trying to make the scoring scheme out of a bigger sample (50 reads instead of 40)
+24.1.:
+- aligning works pretty well, but the score fials to have a discriminative power
+28.1.:
+- encapsulated scoring scheme into a class
+- improved scaling by some optimization method? Nelder-Mead?
+
+####################################################################################################
+filter some reads of all2.tab:
+with open(os.path.join(workplace_path, 'all2.tab')) as f:
+    lines = f.readlines()
+    filtered = []
+    for line in lines:
+        line = line.split('\t')
+        name = line[0]
+        alignments = list(map(int, line[1:5]))
+        coverages = list(map(float, line[-4:]))
+        coverages_sorted = sorted(coverages, reverse=True)
+        alignments_sorted = sorted(alignments, reverse=True)
+        if coverages_sorted[0] < 70 or (alignments_sorted[0]-alignments_sorted[1]) < 30: continue
+        filtered.append((name, np.argmax(coverages)))
+    print(filtered)
+    with open(os.path.join(workplace_path, 'all2_filtered.txt'), 'w') as of:
+        for i in range(len(filtered)):
+            of.write('{} {}\n'.format(filtered[i][0], filtered[i][1]))
+####################################################################################################
+
+5.2.:
+- tried cutting of the 25th quantile of the starts distribution and 75th quantile of tne ends distribution
