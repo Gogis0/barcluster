@@ -46,7 +46,7 @@ class ScoringScheme:
         self.rhist = np.array(rhist)
         self.score = self.ahist / self.rhist
         self.score[self.score < self.low_treshold] = self.low_treshold
-        self.score = [(log10(self.score[i]) - self.delta) for i in range(self.max_distance + 1)]
+        self.score = [log10(self.score[i]) for i in range(self.max_distance + 1)]
         logging.info('Scoring scheme created successfully')
 
         #self.advanced_score = []
@@ -62,7 +62,7 @@ class ScoringScheme:
     def __getitem__(self, key):
         key = int(key*self.bucket_size)
         key = min(key, self.max_distance)
-        return self.score[key]
+        return self.score[key] - self.delta
         #key = min(key, 4.5)
         #return self.advanced_score[int(key*1000)]
 
