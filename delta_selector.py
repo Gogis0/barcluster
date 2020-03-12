@@ -51,8 +51,8 @@ def delta_iterative_search(filename, delta_min, delta_max, delta_step, bucket_dr
 
             for (barcode1, barcode2) in combinations(barcode_list, 2):
                 for (a, b) in product(test_data[barcode1], test_data[barcode2]):
-                    sig1 = preprocess(np.array(f[barcode][a]).astype(float))
-                    sig2 = preprocess(np.array(f[barcode][b]).astype(float))
+                    sig1 = preprocess(np.array(f[barcode1][a]).astype(float))
+                    sig2 = preprocess(np.array(f[barcode2][b]).astype(float))
                     d = ldtw.LikelihoodAlignment(sig1, sig2, scoring_scheme.score,
                                                  scoring_scheme.bucket_size, delta)[0]
                     cross_barcode_scores.setdefault(delta, []).append(d)
