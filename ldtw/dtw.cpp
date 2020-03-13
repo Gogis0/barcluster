@@ -36,8 +36,8 @@ tuple<double, int, int, int, int> LikelihoodAlignment(const vector<double> &sign
     int N = signal1.size();
     int M = signal2.size();
     vector< vector<double> > A(N + 1, vector<double>(M + 1));
-    double ans = 0;
-    pair<int, int> act = {-1, -1};
+    double ans = -1;
+    pair<int, int> act = {1, 1};
     for (int i = 0; i <= N; i++) A[i][0] = 0;
     for (int i = 0; i <= M; i++) A[0][i] = 0;
     for (int i = 1; i <= N; i++) {
