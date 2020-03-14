@@ -20,7 +20,7 @@ void AlignmentThread(vector<vector<double> > &D,
                      const int start, const int end) {
     for (int idx = start; idx < end; idx++) {
         int i = indices[idx].first, j = indices[idx].second;
-        cout << "computing " << i << " " << j << endl;
+        //cout << "computing " << i << " " << j << endl;
         auto ans = LikelihoodAlignment(reads[i], reads[j], scores, bucket_size, 0.5);
 
         D[i][j] = get<0>(ans);
@@ -47,7 +47,7 @@ vector<vector<vector<double> > > ComputeMatrix(const vector<vector< vector<doubl
 					       const int N_threads = 1) {
     auto scoring_scheme = LoadScoringScheme(score_filename);
 
-    int num_samples = windows[0][0].size();
+    int num_samples = windows.size();
     int N = windows[0].size();
     // Subdivide the matrix computation evenly across the threads.
     vector<pair<int, int> > indices;
@@ -71,11 +71,13 @@ vector<vector<vector<double> > > ComputeMatrix(const vector<vector< vector<doubl
 
         for (int i = 0; i < N_threads; i++) workers[i].join();
     }
-    for (int i = 0; i < N; i++) {
-        for (int j = 0; j < i; j++) {
-             D[i][j] = D[j][i];
+    for (int t = 0; t < num_samples; t++) {
+        for (int i = 0; i < N; i++) {
+            for (int j = 0; j < i; j++) {
+                D[t][i][j] = D[t][j][i];
+            }
         }
-     }
+    }
     return D;
 }
 
