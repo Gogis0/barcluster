@@ -89,7 +89,7 @@ vector<vector<vector<double> > > AlignToRepresentatives(const vector< vector<dou
     auto scoring_scheme = LoadScoringScheme(score_filename);
 
     int num_representatives = representatives.size();
-    int num_samples = windows[0][0].size();
+    int num_samples = windows.size();
     int N = windows[0].size();
     // Subdivide the matrix computation evenly across the threads.
     vector<pair<int, int> > indices;
