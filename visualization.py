@@ -60,3 +60,17 @@ def plot_scores(scores, prediction, ground_truth):
     plt.ylabel('Alignment score')
     plt.show()
 
+
+def plot_equiloaded_matrix(N, num_threads):
+    M = np.zeros((N, N))
+    indices = np.array([
+        (i, j) for i in range(N) for j in range(i+1, N)
+    ])
+    chunk_size = len(indices) // num_threads
+    for thread in range(num_threads):
+        start, end = thread*chunk_size, (thread+1)*chunk_size
+        for i, j in indices[start:end]:
+            M[i, j] = thread + 1
+    plt.imshow(M, cmap='inferno')
+    plt.show()
+
