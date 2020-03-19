@@ -61,6 +61,15 @@ def plot_scores(scores, prediction, ground_truth):
     plt.show()
 
 
+def matrix_balanced_imshow(D, cluster_sizes):
+    num_clusters = len(cluster_sizes)
+    positions = [sum(cluster_sizes[:i]) + cluster_sizes[i]//2 for i in range(num_clusters)]
+    plt.xticks(positions, ['barcode {}'.format(i+1) for i in range(num_clusters)])
+    plt.yticks(positions, ['barcode {}'.format(i+1) for i in range(num_clusters)])
+    plt.imshow(D)
+    plt.show()
+
+
 def plot_equiloaded_matrix(N, num_threads):
     M = np.zeros((N, N))
     indices = np.array([
