@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+import numpy as np
 
 
 def make_alignment_figure(squiggle1, squiggle2, path, warping_matrix, barcode_positions=None):
