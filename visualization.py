@@ -1,5 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
+from mpl_toolkits.mplot3d import Axes3D
+from sklearn.manifold import MDS
 
 
 def make_alignment_figure(squiggle1, squiggle2, path, warping_matrix, barcode_positions=None):
@@ -84,3 +86,30 @@ def plot_equiloaded_matrix(N, num_threads):
     plt.imshow(M, cmap='inferno')
     plt.show()
 
+
+def mds_plot(D, dim, cluster_sizes):
+    embedding = MDS(n_components=dim, dissimilarity='precomputed', n_jobs=4)
+    X_transformed = embedding.fit_transform(D)
+    k = len(cluster_sizes)
+    index = 0
+    if dim == 2:
+        for i in range(k):
+            plt.scatter(X_transformed[index:index+cluster_sizes[i], 0],
+                        X_transformed[index:index+cluster_sizes[i], 1],
+                        label='barcode {}'.format(i+1), s=8)
+            index += cluster_sizes[i]
+        plt.title('Stress: {0:.4f}'.format(embedding.stress_/np.sum(D**2)))
+        plt.legend(loc='upper right')
+        plt.show()
+    elif dim == 3:
+        fig = plt.figure()
+        ax = Axes3D(fig)
+        for i in range(k):
+            ax.scatter(X_transformed[index:index+cluster_sizes[i], 0],
+                       X_transformed[index:index+cluster_sizes[i], 1],
+                       X_transformed[index:index+cluster_sizes[i], 2],
+                       label='barcode {}'.format(i+1))
+            index += cluster_sizes[i]
+        plt.title('Stress: {0:.4f}'.format(embedding.stress_/np.sum(D**2)))
+        plt.legend(loc='upper right')
+        plt.show()
