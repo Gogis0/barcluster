@@ -1,6 +1,10 @@
+import os
 import numpy as np
 from sklearn.linear_model import LinearRegression
 from my_dtw import GlobalDTW
+from constants import data_path
+from rdp import rdp
+
 
 def z_normalize(x):
     x -= np.mean(x)
@@ -75,3 +79,29 @@ def trim_blank(sig, window=300):
     return sig[trim_idx:]
 
 
+def rdp_preprocess(signal, epsilon=0.5):
+    x_axis = np.arange(0, signal)
+    signal = rdp(np.array(list(zip(x_axis, signal))), epsilon=epsilon)
+    return signal[:, 1]
+
+
+def save_matrix(filename, names, M):
+    N = len(M)
+    with open(os.path.join(data_path, filename), 'w') as f:
+        f.write('{}\n'.format(N))
+        for i in range(N):
+            f.write('{}\n'.format(names[i]))
+            f.write(','.join(str(x) for x in M[i, :]) + '\n')
+
+
+def load_matrix(filename):
+    with open(os.path.join(data_path, filename), 'r') as f:
+        N = int(next(f))
+        names = []
+        D = np.zeros((N, N))
+        for i in range(N):
+            names.append(f.readline())
+            row = list(map(float, f.readline().split(',')))
+            for j in range(N):
+                D[i, j] = D[j, i] = row[j]
+    return names, D
