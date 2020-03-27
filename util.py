@@ -80,7 +80,7 @@ def trim_blank(sig, window=300):
 
 
 def rdp_preprocess(signal, epsilon=0.5):
-    x_axis = np.arange(0, signal)
+    x_axis = np.arange(0, len(signal))
     signal = rdp(np.array(list(zip(x_axis, signal))), epsilon=epsilon)
     return signal[:, 1]
 
