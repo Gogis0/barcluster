@@ -44,6 +44,14 @@ with open(os.path.join(workplace_path, 'all2.tab')) as f:
         for i in range(len(filtered)):
             of.write('{} {}\n'.format(filtered[i][0], filtered[i][1]))
 ####################################################################################################
+plot delta scatter plot:
+for i in range(num_deltas):
+    plt.scatter([i]*len(inter_list[i]), inter_list[i], s=0.1, alpha=0.1, c='blue')
+    plt.scatter([i]*len(cross_list[i]), cross_list[i], s=0.1, alpha=0.1, c='red')
+    print(np.mean(inter_list[i]), np.mean(cross_list[i]))
+plt.show()
+####################################################################################################
+
 
 5.2.:
 - tried cutting of the 25th quantile of the starts distribution and 75th quantile of tne ends distribution
