@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import seaborn as sn
 from mpl_toolkits.mplot3d import Axes3D
 from sklearn.manifold import MDS
 
@@ -113,3 +114,17 @@ def mds_plot(D, dim, cluster_sizes):
         plt.title('Stress: {0:.4f}'.format(embedding.stress_/np.sum(D**2)))
         plt.legend(loc='upper right')
         plt.show()
+
+
+def plot_contingency(M):
+    """
+    seaborn is now broken, we must fix it manually
+    https://stackoverflow.com/questions/56942670/matplotlib-seaborn-first-and-last-row-cut-in-half-of-heatmap-plot
+    """
+    labels = ['barcode {}'.format(i+1) for i in range(len(M))]
+    plt.figure(figsize=(8, 8))
+    sn.set(font_scale=1.4)
+    ax = sn.heatmap(M, xticklabels=labels, yticklabels=labels, annot=True, fmt="d", cbar=False)
+    bottom, top = ax.get_ylim()
+    ax.set_ylim(bottom + 0.5, top - 0.5)
+    plt.show()
