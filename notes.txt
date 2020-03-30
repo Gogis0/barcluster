@@ -26,24 +26,6 @@ TODO:
 - improved scaling by some optimization method? Nelder-Mead?
 
 ####################################################################################################
-filter some reads of all2.tab:
-with open(os.path.join(workplace_path, 'all2.tab')) as f:
-    lines = f.readlines()
-    filtered = []
-    for line in lines:
-        line = line.split('\t')
-        name = line[0]
-        alignments = list(map(int, line[1:5]))
-        coverages = list(map(float, line[-4:]))
-        coverages_sorted = sorted(coverages, reverse=True)
-        alignments_sorted = sorted(alignments, reverse=True)
-        if coverages_sorted[0] < 70 or (alignments_sorted[0]-alignments_sorted[1]) < 30: continue
-        filtered.append((name, np.argmax(coverages)))
-    print(filtered)
-    with open(os.path.join(workplace_path, 'all2_filtered.txt'), 'w') as of:
-        for i in range(len(filtered)):
-            of.write('{} {}\n'.format(filtered[i][0], filtered[i][1]))
-####################################################################################################
 plot delta scatter plot:
 for i in range(num_deltas):
     plt.scatter([i]*len(inter_list[i]), inter_list[i], s=0.1, alpha=0.1, c='blue')
