@@ -4,9 +4,10 @@ import numpy as np
 from constants import workplace_path, data_path
 
 
-of = h5py.File(os.path.join(data_path, "validation_dataset_big.hdf5"), "a")
+of = h5py.File(os.path.join(workplace_path, "validation_dataset_deepbinner.hdf5"), "a")
 
-path = os.path.join(workplace_path, 'validation')
+#path = os.path.join(workplace_path, 'validation')
+path = '/extdata2/deepbinner-dataset/data'
 for root, _, files in os.walk(path, topdown=False):
     for file in files:
         print(file)
