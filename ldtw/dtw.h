@@ -16,6 +16,8 @@ extern std::tuple<double, int, int, int, int> LikelihoodAlignment(const std::vec
                                                                   const std::vector<double> &signal2,
                                                                   const std::vector<double> &scoring_scheme,
                                                                   const int bucket_size,
-                                                                  const double delta = 0.5);
+                                                                  const double delta = 0.5,
+								  const double score_coef=1,
+								  const double path_coef=0);
 
 #endif //LIKELIDTW_DTW_H

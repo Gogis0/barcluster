@@ -1,5 +1,6 @@
 #include "dtw.h"
 #include <cmath>
+#include <iostream>
 #include <algorithm>
 using namespace std;
 
@@ -32,11 +33,13 @@ tuple<double, int, int, int, int> LikelihoodAlignment(const vector<double> &sign
                            const vector<double> &signal2,
                            const vector<double> &scoring_scheme,
                            const int bucket_size,
-                           const double delta) {
+                           const double delta,
+			   const double score_coef,
+			   const double path_coef) {
     int N = signal1.size();
     int M = signal2.size();
     vector< vector<double> > A(N + 1, vector<double>(M + 1));
-    double ans = -1;
+    double ans = -10000;
     pair<int, int> act = {1, 1};
     for (int i = 0; i <= N; i++) A[i][0] = 0;
     for (int i = 0; i <= M; i++) A[0][i] = 0;
@@ -53,7 +56,7 @@ tuple<double, int, int, int, int> LikelihoodAlignment(const vector<double> &sign
         }
     }
     auto alignment_path = AlignmentPath(A, act);
-    return {ans,
+    return {(score_coef*ans) + (path_coef*alignment_path.size()),
             alignment_path.front().second, alignment_path.back().second,
             alignment_path.front().first, alignment_path.back().first,
     };
