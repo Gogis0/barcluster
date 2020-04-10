@@ -5,20 +5,22 @@ import numpy as np
 import argparse
 from sklearn.cluster import SpectralClustering
 from constants import data_path, workplace_path, prefix_length, bucket_size
-from util import trim_blank, z_normalize, moving_average, save_matrix
+from util import trim_blank, z_normalize, moving_average, moving_median, save_matrix
 from sklearn.metrics.cluster import adjusted_rand_score
 from sklearn.metrics.cluster import contingency_matrix
 from sklearn.metrics.cluster import silhouette_score
 from sklearn.manifold import SpectralEmbedding
 from sklearn import mixture
-
+from itertools import permutations
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('dataset', type=str, default='base',
                     help='the dataset you want to run the pipeline on')
-parser.add_argument('barcodes', nargs='+', type=int, default=None,
-                    help='tha barcodes to use')
+parser.add_argument('--barcodes', nargs='+', type=int, default=None,
+                    help='the barcodes to use')
+parser.add_argument('--delta', type=float, default=0,
+                    help='the delta value to subtract from the score')
 parser.add_argument('sample_size', type=int, default=2000,
                     help='the size of the sample in the initial phase')
 parser.add_argument('test_size', type=int, default=10000,
@@ -31,7 +33,13 @@ parser.add_argument('threads', type=int, default=1,
                     help='the number of threads you want to utilize')
 args = parser.parse_args()
 
-np.random.seed(3)
+#np.random.seed(89)
+
+# filtered read names file
+filtered_file = {'base': 'all2_filtered_3.txt', 'deepbinner': 'all_deepbinner.txt'}
+
+# a dict to store (read_id, label) pairs fof the whole dataset
+filtered = None
 
 
 class MajorityPermutationFail(Exception):
@@ -40,7 +48,17 @@ class MajorityPermutationFail(Exception):
 
 def preprocess(sig):
     normalized = z_normalize(trim_blank(sig.astype(float)))
-    return normalized[:prefix_length]
+    return moving_median(normalized[:prefix_length], 5)
+
+
+def drop_uncertain(D, labels_pred, labels_true, drop_ratio=0.05):
+    D = D[0] + D[1]
+    N = D.shape[0]
+    varlist = [np.var(D[i, :]) for i in range(N)]
+    varlist = np.argsort(varlist)[::-1]
+    taken = int(len(varlist)*(1-drop_ratio))
+    varlist = varlist[:taken]
+    return labels_pred[varlist], labels_true[varlist]
 
 
 def convert_to_distance(S):
@@ -70,9 +88,7 @@ def knn_normalize(D, k):
 
 def get_train_labels(D, k):
     distances = D[0] + D[1]
-    #distances = np.exp(-distances/(2*distances.std()))
-    #distances = distances.max() - distances
-    distances = knn_normalize(distances, int(len(distances)*.1))
+    distances = knn_normalize(distances, int(len(distances)*0.1))
     clustering = SpectralClustering(n_clusters=k,
                                     assign_labels="discretize",
                                     affinity='precomputed',
@@ -88,16 +104,33 @@ def get_inverse_permutation(labels_true, labels_pred, classes=None):
     inverse_permutation = {}
     for i in range(N):
         counts = np.bincount(labels_pred[labels_true == classes[i]])
-        print('class: ', classes[i], 'counts:', counts)
+        #print('class: ', classes[i], 'counts:', counts)
         majority = np.argmax(counts)
         inverse_permutation[majority] = classes[i]
-    print(inverse_permutation)
+    #print(inverse_permutation)
 
     return inverse_permutation
 
 
+def max_likelihood_permutation(labels_true, labels_pred, classes):
+    assert labels_true.shape == labels_pred.shape
+    all_permutations = set(permutations(list(classes)))
+    best_perm = None
+    best_score = -1
+    for permutation in all_permutations:
+        new_labels_pred = labels_pred.copy()
+        for i in range(len(new_labels_pred)):
+            new_labels_pred[i] = permutation[new_labels_pred[i]]
+        score = correctness(new_labels_pred, labels_true)
+        #print(permutation, score)
+        if score > best_score:
+            best_score = score
+            best_perm = permutation
+    return best_perm
+
+
 def depermutate_labels(labels_true, labels_pred, classes):
-    inverse_permutation = get_inverse_permutation(labels_true, labels_pred, classes)
+    inverse_permutation = max_likelihood_permutation(labels_true, labels_pred, classes)
     for i in range(len(labels_pred)):
         try:
             labels_pred[i] = inverse_permutation[labels_pred[i]]
@@ -116,9 +149,9 @@ def get_test_labels(scores, k):
     return labels
 
 
-def choose_representatives(D, labels, num_representatives, k=4):
-    distances = D[0] + D[1]
-    cluster_list = [(np.argwhere(labels == i)).flatten() for i in range(k)]
+def choose_representatives(D, labels, num_representatives, classes=None, k=4):
+    distances = np.log(D[0] + D[1]) # take log for the numerical stability
+    cluster_list = [(np.argwhere(labels == c)).flatten() for c in classes]
     cluster_sizes = [len(x) for x in cluster_list]
 
     """
@@ -126,16 +159,16 @@ def choose_representatives(D, labels, num_representatives, k=4):
     maximal inside_barcode_mean/outside_barcode_mean scores
     """
     representatives = []
-    for cluster in range(k):
+    for cluster in range(len(classes)):
         discriminative_scores = []
         for cluster_member in cluster_list[cluster]:
-            within_cluster_score = np.prod([distances[cluster_member, x] for x in cluster_list[cluster]
+            within_cluster_score = np.sum([distances[cluster_member, x] for x in cluster_list[cluster]
                                             if cluster_member != x])
-            cross_cluster_score = np.prod([distances[cluster_member, x]
+            cross_cluster_score = np.sum([distances[cluster_member, x]
                                            for other_cluster in range(k) if cluster != other_cluster
                                            for x in cluster_list[other_cluster]])
 
-            discriminative_scores.append(within_cluster_score/cross_cluster_score)
+            discriminative_scores.append(within_cluster_score-cross_cluster_score)
 
         discriminative_scores = sorted(enumerate(discriminative_scores), key=lambda x: x[1], reverse=True)
         #np.random.shuffle(discriminative_scores)
@@ -159,14 +192,16 @@ def choose_representatives(D, labels, num_representatives, k=4):
 
 
 def generate_sample(filename, sample_size, use_classes=None):
-    filtered = {}
-    with open(os.path.join(data_path, 'all_deepbinner.txt'), 'r') as all:
-        lines = all.readlines()
-        for line in lines:
-            name, label = line.split()
-            label = int(label)
-            if use_classes is None or label in use_classes:
-                filtered[name] = label
+    global filtered
+    if filtered is None:
+        filtered = {}
+        with open(os.path.join(data_path, filtered_file[args.dataset]), 'r') as all:
+            lines = all.readlines()
+            for line in lines:
+                name, label = line.split()
+                label = int(label)
+                if use_classes is None or label in use_classes:
+                    filtered[name] = label
     chosen_keys = np.random.choice(list(filtered.keys()), sample_size, replace=False)
     fronts = []
     ends = []
@@ -177,6 +212,20 @@ def generate_sample(filename, sample_size, use_classes=None):
             fronts.append(list(preprocess(signal)))
             ends.append(list(preprocess(signal[::-1])))
     return [fronts, ends], [filtered[x] for x in chosen_keys]
+
+
+def class_accuracy(labels_pred, labels_true, k):
+    labels_pred = labels_pred[labels_pred != -1]
+    labels_true = labels_true[labels_true != -1]
+    contingency = contingency_matrix(labels_true, labels_pred)
+    print(contingency)
+    accuracies = []
+    for i in range(k):
+        accuracies.append(contingency[i, i]/np.sum(contingency[i, :])*100)
+    print('Accuracies per classes ::', end='')
+    for i in range(len(accuracies)):
+        print('class {}: {}%'.format(i, accuracies[i]), end='  ')
+    print()
 
 
 def correctness(pred, labels):
@@ -209,17 +258,28 @@ def nonzero_summary(labels_true, labels_pred):
 
 
 def get_label_spectral(D, k, labels_true, classes):
-    D = gaussian_kernel(D)
     clustering = SpectralClustering(n_clusters=k,
-                                    assign_labels='discretize',
+                                    assign_labels='diszretize',
                                     affinity='precomputed',
                                     random_state=0,
-                                    n_init=20,
-                                    n_jobs=4).fit(D)
+                                    n_jobs=1).fit(D)
     labels_pred = clustering.labels_[:-1]
-    inverse_permutation = get_inverse_permutation(labels_true, labels_pred, classes)
+    inverse_permutation = max_likelihood_permutation(labels_true, labels_pred, classes)
     ans = inverse_permutation[clustering.labels_[-1]]
     return ans
+
+
+def get_label_maxmean(scores, k):
+    assert len(scores) > 0
+    N = len(scores)
+    chunk_size = N // k
+    means = [np.mean(scores[i*chunk_size:(i+1)*chunk_size]) for i in range(k)]
+    #print('means:', means)
+    means_sorted = sorted(means, reverse=True)
+    if means_sorted[0]/means_sorted[1] < 1.1:
+        return -1
+    else:
+        return np.argmax(means)
 
 
 def get_labels_gmm(D, k):
@@ -231,7 +291,8 @@ def get_labels_gmm(D, k):
     return labels_pred
 
 
-def validate(D, representatives, scores):
+def validate(D, representatives, scores, classes):
+    k = len(classes)
     D_small = D[np.array(representatives).flatten(), :][:, np.array(representatives).flatten()]
     main_mean = np.mean([D_small[i, i] for i in range(len(D_small))])
     predictions = []
@@ -241,13 +302,15 @@ def validate(D, representatives, scores):
         D_[-1, :-1] = scores[i]
         D_[:-1, -1] = scores[i]
         D_[-1, -1] = main_mean
-        labels_true = np.array([len(representatives[0]) * [i] for i in range(4)]).flatten()
-        ans = get_label_spectral(D_, 4, labels_true)
+        labels_true = np.array([len(representatives[0])*[i] for i in range(k)]).flatten()
+        #ans = get_label_spectral(D_, k, labels_true, classes)
+        ans = get_label_maxmean(scores[i], k)
         predictions.append(ans)
     return predictions
 
 
-def clustering_test(filename, use_classes, train_size, test_size, k, num_representatives, N_threads, num_iters=1):
+def clustering_test(filename, use_classes, train_size, test_size, num_representatives, delta, N_threads, num_iters=1):
+        k = len(use_classes)
         test_data, test_labels_true = generate_sample(filename, test_size, use_classes=use_classes)
         print('test data sampled with class distribution:', np.bincount(test_labels_true))
         test_data = np.array(test_data)
@@ -258,7 +321,8 @@ def clustering_test(filename, use_classes, train_size, test_size, k, num_represe
         for iteration in range(num_iters):
             print('Iteration {}:'.format(iteration))
             if iteration == 0:
-                train_data, train_labels_true = generate_sample(filename, train_size)
+                train_data, train_labels_true = generate_sample(filename, train_size, use_classes)
+                print('train data sampled with class distribution:', np.bincount(train_labels_true))
             else:
                 class_size = train_size//k
                 print(np.nonzero(test_labels_pred_all[-1] == 0)[0].shape)
@@ -268,36 +332,42 @@ def clustering_test(filename, use_classes, train_size, test_size, k, num_represe
                 train_data = [test_data[0][selected_idx], test_data[1][selected_idx]]
                 train_labels_true = np.array(test_labels_true[selected_idx])
             train_data = np.array(train_data)
-            D = ldtw.ComputeMatrix(train_data, os.path.join(data_path, 'scoring_scheme.txt'), bucket_size, N_threads)
+            print('starting train matrix computation ...', end='')
+            D = ldtw.ComputeMatrix(train_data, os.path.join(data_path, 'scoring_scheme_med5.txt'), 0, 1, bucket_size, delta, N_threads)
             D = np.array(D)
-            print('computing train matrix finished')
+            print('finished')
 
             train_labels_true = np.array(train_labels_true)
-            train_labels_pred = depermutate_labels(train_labels_true, np.array(get_train_labels(D, k)), use_classes)
+            train_labels_pred = np.array(get_train_labels(D, k))
+            #train_labels_pred, train_labels_true = drop_uncertain(D, train_labels_pred, train_labels_true)
+            train_labels_pred = depermutate_labels(train_labels_true, train_labels_pred, use_classes)
             print('Train ARI:', nonzero_summary(train_labels_true, train_labels_pred))
             print('Train ACC:', np.sum(train_labels_true==train_labels_pred)/train_size*100)
-            represent_idx, train_labels_pred = choose_representatives(D, train_labels_pred, num_representatives)
+            class_accuracy(train_labels_pred, train_labels_true, k)
+            represent_idx, _ = choose_representatives(D, train_labels_pred, num_representatives, use_classes)
             represent_idx = np.array(represent_idx)
 
-            representatives = [train_data[0][represent_idx.flatten()], train_data[1][represent_idx.flatten()]]
-            score_matrix = ldtw.AlignToRepresentatives(representatives, test_data, os.path.join(data_path, 'scoring_scheme.txt'),
-                                                           bucket_size, N_threads)
-            print('aligning the sample finished')
-            init_matrix = D[0]+D[1]
+            print('starting aligning to representatives ...', end='')
+            representatives = np.array([train_data[0][represent_idx.flatten()], train_data[1][represent_idx.flatten()]])
+            score_matrix = ldtw.AlignToRepresentatives(representatives, test_data, os.path.join(data_path, 'scoring_scheme_med5.txt'),
+                                                           0, 1, bucket_size, delta, N_threads)
+            print('finished')
+            init_matrix = D[0] + D[1]
             score_matrix = np.array(score_matrix)
             score_matrix = score_matrix[0] + score_matrix[1]
 
-            test_labels_pred = validate(init_matrix, represent_idx, score_matrix)
+            test_labels_pred = validate(init_matrix, represent_idx, score_matrix, use_classes)
             test_labels_pred = np.array(test_labels_pred)
             #test_labels_pred = np.array([depermutate_labels(test_labels_true, test_labels_pred[i]) for i in range(2)])
             #test_labels_pred = np.array([test_labels_pred[0][i] if test_labels_pred[0][i]==test_labels_pred[1][i] else -1 for i in range(len(test_labels_pred[0]))])
             #print(test_labels_pred)
             #print(test_labels_true)
-            test_labels_pred = depermutate_labels(test_labels_true, test_labels_pred, use_classes)
-
+            #test_labels_pred = depermutate_labels(test_labels_true, test_labels_pred, use_classes)
             print('Test ARI:', nonzero_summary(test_labels_true, test_labels_pred))
-            print('Test ACC:', np.sum(test_labels_true==test_labels_pred)/test_size*100)
+            #print('Test ACC:', np.sum(test_labels_true==test_labels_pred)/test_size*100)
             #print('Cassified:', np.sum(test_labels_pred==-1)/len(test_labels_pred))
+            correctness_summary(test_labels_pred, test_labels_true)
+            class_accuracy(test_labels_pred, test_labels_true, k)
             test_labels_pred_all.append(test_labels_pred)
             matrices.append(D)
 
@@ -354,6 +424,7 @@ for i in range(10):
     print('Epoch {}'.format(i))
     M, data, labels_true, labels_pred_all = clustering_test(args.dataset+'.hdf5',
                                                             tuple(args.barcodes),
-                                                            args.sample_size, args.test_size, 4,
-                                                            args.representatives, args.threads,
+                                                            args.sample_size, args.test_size,
+                                                            args.representatives, args.delta,
+                                                            args.threads,
                                                             num_iters=args.n_iters)
