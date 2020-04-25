@@ -128,3 +128,24 @@ def plot_contingency(M):
     bottom, top = ax.get_ylim()
     ax.set_ylim(bottom + 0.5, top - 0.5)
     plt.show()
+
+
+def plot_matrix_labelings(D, labels_true, labels_pred):
+    """
+    A function to plot the score matrix with the rows sorted according to labels.
+    The matrix is plotted two times: once for ground truth labels and once for the predicted ones.
+    :param D: matrix of scores
+    :param labels_true: ground truth labels
+    :param labels_pred: predicted labels
+    :return: nothings, plots the images
+    """
+    sorted_idx_true = np.argsort(labels_true)
+    sorted_idx_pred = np.argsort(labels_pred)
+    for idx in [sorted_idx_true, sorted_idx_pred]:
+        M = np.array(D.shape)
+        for i in range(D.shape[0]):
+            for j in range(i, D.shape[1]):
+                M[i, j] = M[j, i] = D[idx[i], idx[j]]
+        plt.imshow(M)
+        plt.show()
+
