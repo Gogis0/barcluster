@@ -3,6 +3,7 @@ import h5py
 import ldtw
 import numpy as np
 import argparse
+import matplotlib.pyplot as plt
 from sklearn.cluster import SpectralClustering
 from constants import data_path, workplace_path, prefix_length, bucket_size
 from util import trim_blank, z_normalize, moving_average, moving_median, save_matrix
@@ -12,6 +13,7 @@ from sklearn.metrics.cluster import silhouette_score
 from sklearn.manifold import SpectralEmbedding
 from sklearn import mixture
 from itertools import permutations
+from sklearn.cluster import AgglomerativeClustering
 
 
 parser = argparse.ArgumentParser()
@@ -41,24 +43,45 @@ filtered_file = {'base': 'all2_filtered_3.txt', 'deepbinner': 'all_deepbinner.tx
 # a dict to store (read_id, label) pairs fof the whole dataset
 filtered = None
 
+# a flag sgnalizing unsignificant barcode match
+NO_BARCODE = -1
+
+# placeholder for alignment scores
+scores = None
+labels = None
+
 
 class MajorityPermutationFail(Exception):
     pass
 
 
-def preprocess(sig):
-    normalized = z_normalize(trim_blank(sig.astype(float)))
-    return moving_median(normalized[:prefix_length], 5)
+def preprocess(sig, is_front=True):
+    if is_front:
+        normalized = z_normalize(trim_blank(sig.astype(float)))
+    else:
+        normalized = z_normalize(trim_blank(sig.astype(float)[::-1]))
+    return moving_median((normalized[:prefix_length])[::-1], 5)
+
+
+def norm_classes(labels):
+    """
+    Maps class labels to form a continous interval 0,...,N
+    Example: (1, 2, 2, 7) -> (0, 1, 1, 2)
+    """
+    inv = {-1: -1}
+    for idx, val in enumerate(sorted(np.unique(labels[labels != NO_BARCODE]))):
+        inv[val] = idx
+    return np.array(list(map(inv.get, labels)))
 
 
 def drop_uncertain(D, labels_pred, labels_true, drop_ratio=0.05):
-    D = D[0] + D[1]
-    N = D.shape[0]
-    varlist = [np.var(D[i, :]) for i in range(N)]
+    D_ = D[0] + D[1]
+    N = D_.shape[0]
+    varlist = [np.var(D_[i, :]) for i in range(N)]
     varlist = np.argsort(varlist)[::-1]
     taken = int(len(varlist)*(1-drop_ratio))
     varlist = varlist[:taken]
-    return labels_pred[varlist], labels_true[varlist]
+    return D[:, varlist, varlist], labels_pred[varlist], labels_true[varlist]
 
 
 def convert_to_distance(S):
@@ -70,15 +93,17 @@ def convert_to_distance(S):
     return S
 
 
-def gaussian_kernel(D):
-    D = np.exp(-D/(2*D.std()))
+def gaussian_kernel(D, sigma=1):
+    #sigma = 2*D.std()
+    D = np.exp(-D/sigma)
     D = convert_to_distance(D)
     return D
 
 
-def knn_normalize(D, k):
+def knn_normalize(D_, k):
+    D = D_.copy()
     for i in range(len(D)):
-        neighbours = np.argsort(D[i,:])[::-1]
+        neighbours = np.argsort(D_[i,:])[::-1]
         for j in range(k):
             D[i, neighbours[j]] = D[neighbours[j], i] = 1000
         for j in range(k+1, len(D)):
@@ -86,10 +111,10 @@ def knn_normalize(D, k):
     return D
 
 
-def get_train_labels(D, k):
+def get_train_labels(D, n_clusters, k=0.1):
     distances = D[0] + D[1]
-    distances = knn_normalize(distances, int(len(distances)*0.1))
-    clustering = SpectralClustering(n_clusters=k,
+    distances = knn_normalize(distances, int(len(distances)*k))
+    clustering = SpectralClustering(n_clusters=n_clusters,
                                     assign_labels="discretize",
                                     affinity='precomputed',
                                     random_state=0,
@@ -130,10 +155,13 @@ def max_likelihood_permutation(labels_true, labels_pred, classes):
 
 
 def depermutate_labels(labels_true, labels_pred, classes):
-    inverse_permutation = max_likelihood_permutation(labels_true, labels_pred, classes)
+    labels_pred = norm_classes(labels_pred)
+    inverse_permutation = max_likelihood_permutation(labels_true[labels_pred != NO_BARCODE], labels_pred[labels_pred != NO_BARCODE], classes)
+    #print('inverse permutation:', inverse_permutation)
     for i in range(len(labels_pred)):
         try:
-            labels_pred[i] = inverse_permutation[labels_pred[i]]
+            if labels_pred[i] != NO_BARCODE:
+                labels_pred[i] = inverse_permutation[labels_pred[i]]
         except:
             raise MajorityPermutationFail
     return labels_pred
@@ -144,14 +172,17 @@ def get_test_labels(scores, k):
     scores = np.maximum(np.array(scores[0]), np.array(scores[1]))
     for s in scores:
         print(np.mean(s))
-        label = k if np.mean(s) > 100 else -1
+        label = k if np.mean(s) > 100 else NO_BARCODE
         labels.append(label)
     return labels
 
 
-def choose_representatives(D, labels, num_representatives, classes=None, k=4):
+def choose_representatives(D, labels, num_representatives, classes=None):
+    k = len(classes)
     distances = np.log(D[0] + D[1]) # take log for the numerical stability
+    #print(distances.shape)
     cluster_list = [(np.argwhere(labels == c)).flatten() for c in classes]
+    #print(cluster_list)
     cluster_sizes = [len(x) for x in cluster_list]
 
     """
@@ -162,11 +193,14 @@ def choose_representatives(D, labels, num_representatives, classes=None, k=4):
     for cluster in range(len(classes)):
         discriminative_scores = []
         for cluster_member in cluster_list[cluster]:
-            within_cluster_score = np.sum([distances[cluster_member, x] for x in cluster_list[cluster]
+            within_cluster_score = np.mean([distances[cluster_member, x] for x in cluster_list[cluster]
                                             if cluster_member != x])
-            cross_cluster_score = np.sum([distances[cluster_member, x]
+            cross_cluster_score = np.mean([distances[cluster_member, x]
                                            for other_cluster in range(k) if cluster != other_cluster
                                            for x in cluster_list[other_cluster]])
+            #cross_cluster_score = np.sum(np.max([distances[cluster_member, x]
+            #                               for x in cluster_list[other_cluster]])
+            #                               for other_cluster in range(k) if cluster != other_cluster)
 
             discriminative_scores.append(within_cluster_score-cross_cluster_score)
 
@@ -210,13 +244,15 @@ def generate_sample(filename, sample_size, use_classes=None):
             #print(filtered[key])
             signal = np.array(f_validation[key])
             fronts.append(list(preprocess(signal)))
-            ends.append(list(preprocess(signal[::-1])))
+            ends.append(list(preprocess(signal, is_front=False)))
     return [fronts, ends], [filtered[x] for x in chosen_keys]
 
 
 def class_accuracy(labels_pred, labels_true, k):
-    labels_pred = labels_pred[labels_pred != -1]
-    labels_true = labels_true[labels_true != -1]
+    labeled_idx = labels_pred != NO_BARCODE
+    labels_pred = labels_pred[labeled_idx]
+    labels_true = labels_true[labeled_idx]
+    print(np.bincount(labels_pred))
     contingency = contingency_matrix(labels_true, labels_pred)
     print(contingency)
     accuracies = []
@@ -234,33 +270,43 @@ def correctness(pred, labels):
     return np.sum(pred == labels)/len(pred)*100
 
 
-def correctness_summary(pred, labels):
+def print_summary(summary, phase):
+    complete_accuracy, labeled_accuracy, labeled_percentage, rand_index = summary
+    print('{} =================================================='.format(phase))
+    print('ARI:', rand_index)
+    print('{:20}:{:6} %'.format('Accuracy (labeled)', labeled_accuracy))
+    print('{:20}:{:6} %'.format('Accuracy (complete)', complete_accuracy))
+    print('{:20}:{:6} %'.format('Percentage of labeled', labeled_percentage))
+    print('==================================================')
+
+
+def correctness_summary(pred, labels, k):
     assert len(pred) == len(labels)
     pred = np.array(pred)
     complete_accuracy = correctness(pred, labels)
     pred_, labels_ = [], []
     for i in range(len(pred)):
-        if pred[i] != -1:
+        if pred[i] != NO_BARCODE:
             pred_.append(pred[i])
             labels_.append(labels[i])
     labeled_accuracy = correctness(pred_, labels_)
     labeled_percentage = (len(pred_)/len(pred))*100
-    print('{:20}:{:6} %'.format('Accuracy (complete)', complete_accuracy))
-    print('{:20}:{:6} %'.format('Accuracy (labeled)', labeled_accuracy))
-    print('{:20}:{:6} %'.format('Percentage of labeled', labeled_percentage))
-    return complete_accuracy, labeled_accuracy, labeled_percentage
+    rand_index = adjusted_rand_score(labels_, pred_)
+    return complete_accuracy, labeled_accuracy, labeled_percentage, rand_index
 
 
 def nonzero_summary(labels_true, labels_pred):
     labels_true = np.array(labels_true)
     labels_pred = np.array(labels_pred)
-    return adjusted_rand_score(labels_true[labels_pred != -1], labels_pred[labels_pred != -1])
+    return adjusted_rand_score(labels_true[labels_pred != NO_BARCODE], labels_pred[labels_pred != NO_BARCODE])
 
 
-def get_label_spectral(D, k, labels_true, classes):
+def get_label_spectral(D, labels_true, classes):
+    k = len(classes)
     clustering = SpectralClustering(n_clusters=k,
-                                    assign_labels='diszretize',
+                                    assign_labels='discretize',
                                     affinity='precomputed',
+                                    n_init=20,
                                     random_state=0,
                                     n_jobs=1).fit(D)
     labels_pred = clustering.labels_[:-1]
@@ -269,15 +315,33 @@ def get_label_spectral(D, k, labels_true, classes):
     return ans
 
 
-def get_label_maxmean(scores, k):
+def get_label_knn(scores, k, classes, num_representatives):
+    # sort the scores ascendingly, preserving the classes
+    scores_sorted = np.array(sorted(enumerate(scores), key=lambda x: x[1], reverse=True))
+    scores_sorted[:, 0] //= num_representatives
+    scores_sorted[:, 0] = scores_sorted[:, 0]
+    first_class_idx = scores_sorted[0, 0]
+    knn_window = scores_sorted[:k, 0]
+    class_counts = np.bincount(knn_window.astype(int))
+    #print(class_counts)
+    #if np.max(class_counts) > 2:
+    #    return classes[np.argmax(class_counts)]
+    if np.all(scores_sorted[:k, 0] == first_class_idx):
+        return classes[int(first_class_idx)]
+    else:
+        return NO_BARCODE
+
+
+def get_label_maxmean(scores, k, identify_unambiguous=True):
     assert len(scores) > 0
     N = len(scores)
     chunk_size = N // k
     means = [np.mean(scores[i*chunk_size:(i+1)*chunk_size]) for i in range(k)]
     #print('means:', means)
     means_sorted = sorted(means, reverse=True)
-    if means_sorted[0]/means_sorted[1] < 1.1:
-        return -1
+    #print(means_sorted[1]/means_sorted[0])
+    if identify_unambiguous and means_sorted[1]/means_sorted[0] > 0.8:
+        return NO_BARCODE
     else:
         return np.argmax(means)
 
@@ -291,32 +355,68 @@ def get_labels_gmm(D, k):
     return labels_pred
 
 
-def validate(D, representatives, scores, classes):
+def validate(D, representatives, scores, classes, identify_unambiguous):
     k = len(classes)
     D_small = D[np.array(representatives).flatten(), :][:, np.array(representatives).flatten()]
     main_mean = np.mean([D_small[i, i] for i in range(len(D_small))])
     predictions = []
+    predictions_forced = []
     for i in range(len(scores)):
         D_ = np.zeros((D_small.shape[0] + 1, D_small.shape[1] + 1))
         D_[:-1, :-1] = D_small
         D_[-1, :-1] = scores[i]
         D_[:-1, -1] = scores[i]
         D_[-1, -1] = main_mean
-        labels_true = np.array([len(representatives[0])*[i] for i in range(k)]).flatten()
-        #ans = get_label_spectral(D_, k, labels_true, classes)
-        ans = get_label_maxmean(scores[i], k)
+        labels_true = np.array([len(representatives[i])*[i] for i in range(k)]).flatten()
+        ans = get_label_maxmean(scores[i], k, identify_unambiguous)
+        #ans = get_label_knn(scores[i], 3, classes, len(representatives[0]))
+        if ans != NO_BARCODE:
+            ans = get_label_spectral(D_, labels_true, classes)
+        predictions_forced.append(get_label_spectral(D_, labels_true, classes))
         predictions.append(ans)
-    return predictions
+    return predictions, predictions_forced
+
+
+def get_gud_cols(S, drop, n_repr):
+    colvar = np.var(S, axis=0)
+    gone = []
+    for i in range(4):
+        gone.append(np.argsort(colvar[i*n_repr:(i+1)*n_repr])[drop:])
+    return np.array(gone).flatten()
+
+
+def adaptive_knn(D, n_clusters, labels_true, classes, min_k, max_k, step_k):
+    min_silhouette = -1
+    best_labels = None
+    D = D[0] + D[1]
+    for k in np.arange(min_k, max_k, step_k):
+        D_ = knn_normalize(D, k)
+        clustering = SpectralClustering(n_clusters=n_clusters,
+                                        assign_labels="discretize",
+                                        affinity='precomputed',
+                                        random_state=0,
+                                        n_jobs=1).fit(D_)
+        labels_pred = np.array(clustering.labels_)
+        #labels_pred = depermutate_labels(labels_true, labels_pred, classes)
+        act_silhouette = silhouette_score(convert_to_distance(gaussian_kernel(D)), labels_pred)
+        if act_silhouette > min_silhouette:
+            min_silhouette = act_silhouette
+            best_labels = labels_pred
+    return best_labels
+
 
 
 def clustering_test(filename, use_classes, train_size, test_size, num_representatives, delta, N_threads, num_iters=1):
+        global scores
+        global labels
+        identify_unambiguous = True
         k = len(use_classes)
         test_data, test_labels_true = generate_sample(filename, test_size, use_classes=use_classes)
         print('test data sampled with class distribution:', np.bincount(test_labels_true))
         test_data = np.array(test_data)
         test_labels_true = np.array(test_labels_true)
         test_labels_pred_all = []
-        matrices = []
+        latest_summary = None
 
         for iteration in range(num_iters):
             print('Iteration {}:'.format(iteration))
@@ -325,7 +425,7 @@ def clustering_test(filename, use_classes, train_size, test_size, num_representa
                 print('train data sampled with class distribution:', np.bincount(train_labels_true))
             else:
                 class_size = train_size//k
-                print(np.nonzero(test_labels_pred_all[-1] == 0)[0].shape)
+                #print(np.nonzero(test_labels_pred_all[-1] == 0)[0].shape)
                 selected_idx = [np.random.choice(np.nonzero(test_labels_pred_all[-1] == barcode)[0],
                         class_size, replace=False) for barcode in range(k)]
                 selected_idx = np.concatenate(selected_idx, axis=0)
@@ -333,98 +433,167 @@ def clustering_test(filename, use_classes, train_size, test_size, num_representa
                 train_labels_true = np.array(test_labels_true[selected_idx])
             train_data = np.array(train_data)
             print('starting train matrix computation ...', end='')
-            D = ldtw.ComputeMatrix(train_data, os.path.join(data_path, 'scoring_scheme_med5.txt'), 0, 1, bucket_size, delta, N_threads)
-            D = np.array(D)
+            D = np.array(ldtw.ComputeMatrix(train_data, os.path.join(data_path, 'scoring_scheme_med5.txt'), 0, 1, bucket_size, delta, N_threads))
+            D_ = D.copy()
+            D_[D_ < 300] = 1
             print('finished')
 
             train_labels_true = np.array(train_labels_true)
-            train_labels_pred = np.array(get_train_labels(D, k))
-            #train_labels_pred, train_labels_true = drop_uncertain(D, train_labels_pred, train_labels_true)
+            #train_labels_pred = np.array(get_train_labels(D, k))
+            train_labels_pred = np.array(adaptive_knn(D, k, train_labels_true, use_classes, 10, train_size//4, 10))
+            #D, train_labels_pred, train_labels_true = drop_uncertain(D, train_labels_pred, train_labels_true)
             train_labels_pred = depermutate_labels(train_labels_true, train_labels_pred, use_classes)
-            print('Train ARI:', nonzero_summary(train_labels_true, train_labels_pred))
-            print('Train ACC:', np.sum(train_labels_true==train_labels_pred)/train_size*100)
+            train_summary = correctness_summary(train_labels_pred, train_labels_true, k)
+            print_summary(train_summary, 'TRAIN')
             class_accuracy(train_labels_pred, train_labels_true, k)
+
             represent_idx, _ = choose_representatives(D, train_labels_pred, num_representatives, use_classes)
             represent_idx = np.array(represent_idx)
-
+            print('Contingency of representatives:')
+            print(contingency_matrix(train_labels_true[represent_idx], train_labels_pred[represent_idx]))
             print('starting aligning to representatives ...', end='')
             representatives = np.array([train_data[0][represent_idx.flatten()], train_data[1][represent_idx.flatten()]])
             score_matrix = ldtw.AlignToRepresentatives(representatives, test_data, os.path.join(data_path, 'scoring_scheme_med5.txt'),
-                                                           0, 1, bucket_size, delta, N_threads)
+                                                           1, 0, bucket_size, delta, N_threads)
+            scores = score_matrix
+            labels = test_labels_true
             print('finished')
             init_matrix = D[0] + D[1]
             score_matrix = np.array(score_matrix)
             score_matrix = score_matrix[0] + score_matrix[1]
+            #score_matrix[score_matrix < 300] = 1
 
-            test_labels_pred = validate(init_matrix, represent_idx, score_matrix, use_classes)
+            #gud_cols = get_gud_cols(score_matrix, 5, num_representatives)
+            test_labels_pred, test_labels_pred_forced = validate(init_matrix, represent_idx, score_matrix, use_classes, identify_unambiguous)
             test_labels_pred = np.array(test_labels_pred)
+            test_labels_pred_forced = np.array(test_labels_pred_forced)
             #test_labels_pred = np.array([depermutate_labels(test_labels_true, test_labels_pred[i]) for i in range(2)])
             #test_labels_pred = np.array([test_labels_pred[0][i] if test_labels_pred[0][i]==test_labels_pred[1][i] else -1 for i in range(len(test_labels_pred[0]))])
             #print(test_labels_pred)
             #print(test_labels_true)
-            #test_labels_pred = depermutate_labels(test_labels_true, test_labels_pred, use_classes)
-            print('Test ARI:', nonzero_summary(test_labels_true, test_labels_pred))
-            #print('Test ACC:', np.sum(test_labels_true==test_labels_pred)/test_size*100)
-            #print('Cassified:', np.sum(test_labels_pred==-1)/len(test_labels_pred))
-            correctness_summary(test_labels_pred, test_labels_true)
+            test_labels_pred = depermutate_labels(test_labels_true, test_labels_pred, use_classes)
+            latest_summary = correctness_summary(test_labels_pred, test_labels_true, k)
+            print_summary(latest_summary, 'TEST -- uncertain labels ON')
+            if identify_unambiguous == True:
+                test_labels_pred_forced = depermutate_labels(test_labels_true, test_labels_pred_forced, use_classes)
+                latest_summary = correctness_summary(test_labels_pred_forced, test_labels_true, k)
+                print_summary(latest_summary, 'TEST -- uncertain labels OFF')
             class_accuracy(test_labels_pred, test_labels_true, k)
             test_labels_pred_all.append(test_labels_pred)
-            matrices.append(D)
 
         print('iterations completed')
-        test_labels_pred = np.array(test_labels_pred_all)
-        maximums = np.array([np.argmax(np.bincount(test_labels_pred[:, i])) for i in range(test_size)])
-        test_labels_pred = np.array([maximums[i] if np.sum(test_labels_pred[:, i] == maximums[i]) >= num_iters//2\
-                            else -1 for i in range(test_size)])
-        correctness_summary(test_labels_pred, test_labels_true)
+        #test_labels_pred = np.array(test_labels_pred_all)
+        #maximums = np.array([np.argmax(np.bincount(test_labels_pred[:, i])) for i in range(test_size)])
+        #test_labels_pred = np.array([maximums[i] if np.sum(test_labels_pred[:, i] == maximums[i]) >= num_iters//2\
+        #                    else -1 for i in range(test_size)])
 
-        return matrices, test_data, test_labels_true, test_labels_pred_all
+        return test_data, test_labels_true, test_labels_pred_all, latest_summary
 
 
-def matrix_test(filename, num_epochs, train_size, k, num_samples, N_threads):
-    rand_scores = []
-    silhouette_scores = []
-    accuracies = []
+def get_labels(D, n_clusters):
+    clustering = SpectralClustering(n_clusters=n_clusters,
+                                    assign_labels="discretize",
+                                    affinity='precomputed',
+                                    random_state=0,
+                                    n_jobs=1).fit(D)
+    return clustering.labels_
+
+
+def compute_cut(D, labels):
+    N = len(D)
+    cut_value = 0
+    for i in range(N):
+        for j in range(N):
+            if labels[i] != labels[j]:
+                cut_value += D[i, j]
+    return cut_value
+
+
+def RMD(D, classes, l=20):
+    print(D.shape)
+    n_classes = len(classes)
+    # computation of special G 'rank' for each data point
+    N = len(D)
+    G = [
+        np.mean(sorted(D[i, :])[l:(l*2)]) for i in range(N)
+    ]
+    # sort by 'ranks'
+    rank = np.argsort(G)/N
+    # try different k,lambda to construct graphs
+    min_cut = 2**1000
+    labels = None
+    for k in range(10, 50, 10):
+        for lam in [0.1, 0.2, 0.4, 0.6, 0.8, 1]:
+            M = np.zeros(shape=D.shape) + 1
+            for i in range(N):
+                deg = int(k*(lam + 2*(1-lam)*rank[i]))
+                neighbours = np.argsort(D[i, :])[::-1]
+                for j in range(deg):
+                    M[neighbours[j], i] = M[i, neighbours[j]] = 1000
+            labels_pred = get_labels(M, n_classes)
+            cut_value = compute_cut(D, labels_pred)
+            if cut_value < min_cut:
+                labels = labels_pred
+                min_cut = cut_value
+            #print(k, lam, cut_value)
+    return labels
+
+
+def plot_mislabeled(D, labels_true, labels_pred, name):
+    alpha = np.zeros(D.shape)
+    mislabeled = (labels_pred != labels_true)
+    alpha[mislabeled, :] = 1
+    alpha[:, mislabeled] = 1
+    plt.imshow(D*alpha)
+    plt.savefig(name)
+
+
+def matrix_test(filename, num_epochs, train_size, classes, delta, N_threads):
+    k = len(classes)
+    summaries = []
     for epoch in range(num_epochs):
         print('Epoch: {}'.format(epoch))
-        train_data, labels_true = generate_sample(filename, train_size)
+        train_data, labels_true = generate_sample(filename, train_size, use_classes=classes)
         train_data = np.array(train_data)
         labels_true = np.array(labels_true)
-        D = ldtw.ComputeMatrix(train_data, os.path.join(data_path, 'scoring_scheme.txt'), bucket_size, N_threads)
-        print('ldtw finished')
-        D = np.array(D)
+        D = np.array(ldtw.ComputeMatrix(train_data, os.path.join(data_path, 'scoring_scheme_med5.txt'), 0, 1, bucket_size, delta, N_threads))
+        #return D, labels_true
+        #print('ldtw finished')
         labels_pred = []
-        for i in range(num_samples):
-            clustering = SpectralClustering(n_clusters=k,
-                                            assign_labels='discretize',
-                                            affinity='precomputed',
-                                            random_state=0,
-                                            n_init=10).fit(gaussian_kernel(D[i]))
-            labels = np.array(clustering.labels_)
-            labels = depermutate_labels(labels_true, labels)
-            print('one side ACC:', np.sum(labels_true==labels)/train_size*100)
-            print(list(labels)[:20])
-            labels_pred.append(labels)
-        
-        labels_pred = np.array([labels_pred[0][i] if labels_pred[0][i]==labels_pred[1][i] else -1 for i in range(len(labels_pred[0]))])
-        print(labels_pred[:20])
+        #labels = adaptive_knn(D, k, labels_true, classes, 10, train_size//2, 10)
+        #labels = RMD(D[0]+D[1], classes)
+        clustering = AgglomerativeClustering(n_clusters=k, affinity='precomputed').fit(convert_to_distance(D[0]+D[1]))
+        labels = clustering.labels_
+        labels = depermutate_labels(labels_true, labels, classes)
+        #print('one side ACC:', np.sum(labels_true==labels)/train_size*100)
+        #print(list(labels)[:20])
+        labels_pred = labels
+       
+        #plot_mislabeled(D[0]+D[1], labels_true, labels_pred, os.path.join('images', 'mislabeled{}.png'.format(epoch)))
+        summary = correctness_summary(labels_pred, labels_true, k)
+        print_summary(summary, 'TRAIN')
+        summaries.append(summary)
+        class_accuracy(labels_pred, labels_true, k)
+        #labels_pred = np.array([labels_pred[0][i] if labels_pred[0][i]==labels_pred[1][i] else -1 for i in range(len(labels_pred[0]))])
+        #print(labels_pred[:20])
 
         #rand_scores.append(adjusted_rand_score(labels_true, labels_pred))
         #silhouette_scores.append(silhouette_score(convert_to_distance(D), labels_pred))
-        accuracies.append(np.sum(labels_true==labels_pred)/train_size*100)
-        correctness_summary(labels_pred, labels_true)
     #print('mean ARI:', np.mean(rand_scores))
     #print('mean SC:', np.mean(silhouette_scores))
-    print('mean ACC:', np.mean(accuracies))
+    print_summary(np.mean(summaries, axis=0), 'final')
 
 
-#matrix_test('validation_dataset_big.hdf5', 50, 2000, 4, 2, 15)
-
+#matrix_test(args.dataset + '.hdf5', args.n_iters, args.sample_size, tuple(args.barcodes), args.delta, args.threads)
+metrics = []
 for i in range(10):
     print('Epoch {}'.format(i))
-    M, data, labels_true, labels_pred_all = clustering_test(args.dataset+'.hdf5',
+    data, labels_true, labels_pred_all, summary = clustering_test(args.dataset+'.hdf5',
                                                             tuple(args.barcodes),
                                                             args.sample_size, args.test_size,
                                                             args.representatives, args.delta,
                                                             args.threads,
                                                             num_iters=args.n_iters)
+    metrics.append(summary)
+print('Mean performance:')
+print_summary(np.mean(metrics, axis=0), 'Mean of all runs')
