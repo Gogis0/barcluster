@@ -3,6 +3,7 @@ import h5py
 import ldtw
 import numpy as np
 import argparse
+import multiprocessing
 import matplotlib.pyplot as plt
 from sklearn.cluster import SpectralClustering
 from constants import data_path, workplace_path, prefix_length, bucket_size
@@ -10,10 +11,13 @@ from util import trim_blank, z_normalize, moving_average, moving_median, save_ma
 from sklearn.metrics.cluster import adjusted_rand_score
 from sklearn.metrics.cluster import contingency_matrix
 from sklearn.metrics.cluster import silhouette_score
+from sklearn.metrics import f1_score
 from sklearn.manifold import SpectralEmbedding
 from sklearn import mixture
 from itertools import permutations
 from sklearn.cluster import AgglomerativeClustering
+from tqdm import tqdm
+from functools import partial
 
 
 parser = argparse.ArgumentParser()
@@ -225,6 +229,15 @@ def choose_representatives(D, labels, num_representatives, classes=None):
     return representatives, labels
 
 
+def generator(filename, key):
+    windows = []
+    with h5py.File(os.path.join(workplace_path, filename), 'r') as f:
+        signal = np.array(f[key])
+        windows.append(list(preprocess(signal)))
+        windows.append(list(preprocess(signal, is_front=False)))
+    return windows
+
+
 def generate_sample(filename, sample_size, use_classes=None):
     global filtered
     if filtered is None:
@@ -239,12 +252,24 @@ def generate_sample(filename, sample_size, use_classes=None):
     chosen_keys = np.random.choice(list(filtered.keys()), sample_size, replace=False)
     fronts = []
     ends = []
-    with h5py.File(os.path.join(workplace_path, filename), 'r') as f_validation:
-        for key in chosen_keys:
+    #with h5py.File(os.path.join(workplace_path, filename), 'r') as f_validation:
+    """
+        for key in tqdm(chosen_keys):
             #print(filtered[key])
             signal = np.array(f_validation[key])
             fronts.append(list(preprocess(signal)))
             ends.append(list(preprocess(signal, is_front=False)))
+    """
+    pool = multiprocessing.Pool()
+    worker_partial = partial(generator, filename)
+    fronts, ends = [], []
+    for prefix, suffix in tqdm(pool.imap(worker_partial, [key for key in chosen_keys], chunksize=1), total=sample_size):
+        fronts.append(prefix)
+        ends.append(suffix)
+    pool.close()
+    pool.join()
+    #fronts = [pooled_windows[i][0] for i in range(sample_size)]
+    #ends = [pooled_windows[i][1] for i in range(sample_size)]
     return [fronts, ends], [filtered[x] for x in chosen_keys]
 
 
@@ -255,12 +280,17 @@ def class_accuracy(labels_pred, labels_true, k):
     print(np.bincount(labels_pred))
     contingency = contingency_matrix(labels_true, labels_pred)
     print(contingency)
-    accuracies = []
+    precisions, recalls, = [], []
     for i in range(k):
-        accuracies.append(contingency[i, i]/np.sum(contingency[i, :])*100)
-    print('Accuracies per classes ::', end='')
-    for i in range(len(accuracies)):
-        print('class {}: {}%'.format(i, accuracies[i]), end='  ')
+        precisions.append(contingency[i, i]/np.sum(contingency[i, :])*100)
+        recalls.append(contingency[i, i]/np.sum(contingency[:, i])*100)
+    print('Precision per class ::', end='')
+    for i in range(len(precisions)):
+        print('class {}: {}%'.format(i+1, precisions[i]), end='  ')
+    print()
+    print('Recall per classes  ::', end='')
+    for i in range(len(recalls)):
+        print('class {}: {}%'.format(i+1, recalls[i]), end='  ')
     print()
 
 
@@ -340,7 +370,7 @@ def get_label_maxmean(scores, k, identify_unambiguous=True):
     #print('means:', means)
     means_sorted = sorted(means, reverse=True)
     #print(means_sorted[1]/means_sorted[0])
-    if identify_unambiguous and means_sorted[1]/means_sorted[0] > 0.8:
+    if identify_unambiguous and means_sorted[1]/means_sorted[0] > 0.9:
         return NO_BARCODE
     else:
         return np.argmax(means)
@@ -355,15 +385,42 @@ def get_labels_gmm(D, k):
     return labels_pred
 
 
+def validator(D, main_mean, labels_true, classes, scores):
+    k = len(classes)
+    D_ = np.zeros((D.shape[0] + 1, D.shape[1] + 1))
+    D_[:-1, :-1] = D
+    D_[-1, :-1] = scores
+    D_[:-1, -1] = scores
+    D_[-1, -1] = main_mean
+    hard_label = get_label_spectral(D_, labels_true, classes)
+    soft_label = get_label_maxmean(scores, k, True)
+    if soft_label != NO_BARCODE:
+        soft_label = hard_label
+    return soft_label, hard_label
+
+
+
 def validate(D, representatives, scores, classes, identify_unambiguous):
     k = len(classes)
-    D_small = D[np.array(representatives).flatten(), :][:, np.array(representatives).flatten()]
-    main_mean = np.mean([D_small[i, i] for i in range(len(D_small))])
+    N = len(scores)
+    #D_small = D[np.array(representatives).flatten(), :][:, np.array(representatives).flatten()]
+    main_mean = np.mean([D[i, i] for i in range(len(D))])
+    labels_true = np.array([len(representatives[i])*[i] for i in range(k)]).flatten()
     predictions = []
     predictions_forced = []
+
+    pool = multiprocessing.Pool()
+    worker_partial = partial(validator, D, main_mean, labels_true, classes)
+    for soft, hard in tqdm(pool.imap(worker_partial, [scores[i] for i in range(N)], chunksize=1), total=N):
+        predictions.append(soft)
+        predictions_forced.append(hard)
+    pool.close()
+    pool.join()
+
+    """
     for i in range(len(scores)):
-        D_ = np.zeros((D_small.shape[0] + 1, D_small.shape[1] + 1))
-        D_[:-1, :-1] = D_small
+        D_ = np.zeros((D.shape[0] + 1, D.shape[1] + 1))
+        D_[:-1, :-1] = D
         D_[-1, :-1] = scores[i]
         D_[:-1, -1] = scores[i]
         D_[-1, -1] = main_mean
@@ -374,6 +431,7 @@ def validate(D, representatives, scores, classes, identify_unambiguous):
             ans = get_label_spectral(D_, labels_true, classes)
         predictions_forced.append(get_label_spectral(D_, labels_true, classes))
         predictions.append(ans)
+    """
     return predictions, predictions_forced
 
 
@@ -405,6 +463,56 @@ def adaptive_knn(D, n_clusters, labels_true, classes, min_k, max_k, step_k):
     return best_labels
 
 
+def plot_f1_agains_tau(init_matrix, represent_idx, score_matrix, label_true, classes):
+    tau_range = np.arange(0, 1.01, 0.05)
+    f1_scores = []
+    for tau in tau_range:
+        labels_pred, _ = validate(init_matrix, represent_idx, score_matrix, classes, tau)
+        f1_scores.append(f1_score(labels_true, labels_pred, average='weighted'))
+    plt.plot(f1_scores)
+    plt.xticks(range(len(tau_range)), tau_range)
+    plt.savefig('f1_score.png')
+
+
+def discovery_aggregator(filename, train_size, classes, n_iters, n_representatives, delta, n_threads=1):
+    k = len(classes)
+    n_repr = 10
+    representatives = [
+            [ [] for i in range(k) ] for j in range(2)
+        ]
+    represent_idx = np.array([ list(range(i*n_repr*n_iters, (i+1)*n_repr*n_iters)) for i in range(k) ])
+    for iteration in range(n_iters):
+        train_data, train_labels_true = generate_sample(filename, train_size, classes)
+        train_data = np.array(train_data)
+        print('train data sampled with class distribution:', np.bincount(train_labels_true))
+        print('starting train matrix computation ...', end='')
+        D = ldtw.ComputeMatrix(train_data, os.path.join(data_path, 'scoring_scheme_med5.txt'), 0, 1,
+                               bucket_size, delta, n_threads)
+        print('finished')
+        D = np.array(D)
+        train_labels_true = np.array(train_labels_true)
+        train_labels_pred = np.array(adaptive_knn(D, k, train_labels_true, classes, 5, train_size // 4, 10))
+        # D, train_labels_pred, train_labels_true = drop_uncertain(D, train_labels_pred, train_labels_true)
+        train_labels_pred = depermutate_labels(train_labels_true, train_labels_pred, classes)
+        train_summary = correctness_summary(train_labels_pred, train_labels_true, k)
+        print_summary(train_summary, 'TRAIN -- iteration {}'.format(iteration+1))
+        print('Contingency of representatives:')
+        class_accuracy(train_labels_pred, train_labels_true, k)
+
+        idx, _ = choose_representatives(D, train_labels_pred, n_repr, classes)
+        idx = np.array(idx)
+        #print(contingency_matrix(train_labels_true[represent_idx], train_labels_pred[represent_idx]))
+        for i in range(2):
+            for j in range(k):
+                representatives[i][j].extend(train_data[i][idx[j]])
+
+    for i in range(2):
+        representatives[i] = np.concatenate(representatives[i])
+
+    matrix = ldtw.ComputeMatrix(representatives, os.path.join(data_path, 'scoring_scheme_med5.txt'), 0, 1,
+                           bucket_size, delta, n_threads)
+    return representatives, represent_idx, np.array(matrix)
+
 
 def clustering_test(filename, use_classes, train_size, test_size, num_representatives, delta, N_threads, num_iters=1):
         global scores
@@ -420,10 +528,7 @@ def clustering_test(filename, use_classes, train_size, test_size, num_representa
 
         for iteration in range(num_iters):
             print('Iteration {}:'.format(iteration))
-            if iteration == 0:
-                train_data, train_labels_true = generate_sample(filename, train_size, use_classes)
-                print('train data sampled with class distribution:', np.bincount(train_labels_true))
-            else:
+            if iteration > 0:
                 class_size = train_size//k
                 #print(np.nonzero(test_labels_pred_all[-1] == 0)[0].shape)
                 selected_idx = [np.random.choice(np.nonzero(test_labels_pred_all[-1] == barcode)[0],
@@ -431,28 +536,9 @@ def clustering_test(filename, use_classes, train_size, test_size, num_representa
                 selected_idx = np.concatenate(selected_idx, axis=0)
                 train_data = [test_data[0][selected_idx], test_data[1][selected_idx]]
                 train_labels_true = np.array(test_labels_true[selected_idx])
-            train_data = np.array(train_data)
-            print('starting train matrix computation ...', end='')
-            D = np.array(ldtw.ComputeMatrix(train_data, os.path.join(data_path, 'scoring_scheme_med5.txt'), 0, 1, bucket_size, delta, N_threads))
-            D_ = D.copy()
-            D_[D_ < 300] = 1
-            print('finished')
 
-            train_labels_true = np.array(train_labels_true)
-            #train_labels_pred = np.array(get_train_labels(D, k))
-            train_labels_pred = np.array(adaptive_knn(D, k, train_labels_true, use_classes, 10, train_size//4, 10))
-            #D, train_labels_pred, train_labels_true = drop_uncertain(D, train_labels_pred, train_labels_true)
-            train_labels_pred = depermutate_labels(train_labels_true, train_labels_pred, use_classes)
-            train_summary = correctness_summary(train_labels_pred, train_labels_true, k)
-            print_summary(train_summary, 'TRAIN')
-            class_accuracy(train_labels_pred, train_labels_true, k)
-
-            represent_idx, _ = choose_representatives(D, train_labels_pred, num_representatives, use_classes)
-            represent_idx = np.array(represent_idx)
-            print('Contingency of representatives:')
-            print(contingency_matrix(train_labels_true[represent_idx], train_labels_pred[represent_idx]))
+            representatives, represent_idx, D = discovery_aggregator(filename, train_size, use_classes, 5, num_representatives, delta, N_threads)
             print('starting aligning to representatives ...', end='')
-            representatives = np.array([train_data[0][represent_idx.flatten()], train_data[1][represent_idx.flatten()]])
             score_matrix = ldtw.AlignToRepresentatives(representatives, test_data, os.path.join(data_path, 'scoring_scheme_med5.txt'),
                                                            1, 0, bucket_size, delta, N_threads)
             scores = score_matrix
@@ -465,6 +551,7 @@ def clustering_test(filename, use_classes, train_size, test_size, num_representa
 
             #gud_cols = get_gud_cols(score_matrix, 5, num_representatives)
             test_labels_pred, test_labels_pred_forced = validate(init_matrix, represent_idx, score_matrix, use_classes, identify_unambiguous)
+            #plot_f1_agains_tau(init_matrix, represent_idx, score_matrix, test_labels_true, use_classes)
             test_labels_pred = np.array(test_labels_pred)
             test_labels_pred_forced = np.array(test_labels_pred_forced)
             #test_labels_pred = np.array([depermutate_labels(test_labels_true, test_labels_pred[i]) for i in range(2)])
